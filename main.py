@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -29,6 +30,11 @@ VALID_SELECTIONS = ("default", "legion_go_s", "ps5_edge")
 
 BACKUP_META_FILE = "backup_meta.json"
 BACKUP_YAML_FILE = "device_yaml_backup.yaml"
+
+INPUTPLUMBER_READY_TIMEOUT_SEC = 30.0
+INPUTPLUMBER_READY_POLL_SEC = 0.5
+INPUTPLUMBER_TARGET_RETRIES = 12
+INPUTPLUMBER_TARGET_RETRY_DELAY_SEC = 1.0
 
 
 class Plugin:
@@ -102,6 +108,45 @@ class Plugin:
             )
             is not None
         )
+
+    def _inputplumber_service_active(self) -> bool:
+        return (
+            self._run_command(
+                [SYSTEMCTL, "is-active", "--quiet", "inputplumber"],
+                record_error=False,
+            )
+            is not None
+        )
+
+    def _wait_for_inputplumber_ready(self) -> bool:
+        deadline = time.monotonic() + INPUTPLUMBER_READY_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            if self._inputplumber_service_active():
+                return True
+            time.sleep(INPUTPLUMBER_READY_POLL_SEC)
+        return bool(
+            self._set_error("InputPlumber service did not become active after restart")
+        )
+
+    def _set_inputplumber_target_with_retry(self, target: str) -> bool:
+        last_detail = ""
+        for attempt in range(1, INPUTPLUMBER_TARGET_RETRIES + 1):
+            self.last_error = ""
+            if self._set_inputplumber_target(target):
+                return True
+            last_detail = self.last_error
+            decky.logger.warning(
+                "inputplumber target set attempt %s/%s failed: %s",
+                attempt,
+                INPUTPLUMBER_TARGET_RETRIES,
+                last_detail,
+            )
+            if attempt < INPUTPLUMBER_TARGET_RETRIES:
+                time.sleep(INPUTPLUMBER_TARGET_RETRY_DELAY_SEC)
+        self._set_error(
+            last_detail or f"Failed to set inputplumber target {target}"
+        )
+        return False
 
     def _read_board_name(self) -> str | None:
         try:
@@ -180,7 +225,9 @@ class Plugin:
                 )
 
     def _restart_inputplumber(self) -> bool:
-        return self._run_command([SYSTEMCTL, "restart", "inputplumber"]) is not None
+        if self._run_command([SYSTEMCTL, "restart", "inputplumber"]) is None:
+            return False
+        return self._wait_for_inputplumber_ready()
 
     def _load_backup_meta(self) -> dict | None:
         path = self._backup_meta_path()
@@ -317,7 +364,7 @@ class Plugin:
             )
             return
 
-        if self._set_inputplumber_target(PS5_EDGE_TARGET):
+        if self._set_inputplumber_target_with_retry(PS5_EDGE_TARGET):
             decky.logger.info(
                 "Reapplied %s inputplumber target on startup", PS5_EDGE_NAME
             )
@@ -441,7 +488,7 @@ class Plugin:
 
         if previous == selection:
             if selection == "ps5_edge":
-                return self._set_inputplumber_target(PS5_EDGE_TARGET)
+                return self._set_inputplumber_target_with_retry(PS5_EDGE_TARGET)
             return True
 
         yaml_profile = self._detect_yaml_profile(yaml_path)
@@ -454,7 +501,7 @@ class Plugin:
             if yaml_profile != "default":
                 if not await self._restore_default_yaml(yaml_path):
                     return False
-            if not self._set_inputplumber_target(PS5_EDGE_TARGET):
+            if not self._set_inputplumber_target_with_retry(PS5_EDGE_TARGET):
                 return False
             self.settings["selected_controller"] = "ps5_edge"
             await self.save_settings()
