@@ -1,0 +1,11 @@
+{
+  "name": "SteamOS Controller Changer",
+  "author": "lonsdaleite",
+  "flags": ["root"],
+  "api_version": 1,
+  "publish": {
+    "tags": ["hardware", "inputplumber", "controller", "legion-go-s", "steamos"],
+    "description": "Switch InputPlumber controller profile between the native device and Lenovo Legion Go S.",
+    "image": ""
+  }
+}

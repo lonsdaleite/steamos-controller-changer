@@ -1,0 +1,387 @@
+"""
+steamos-controller-changer - Decky Loader Plugin Backend
+Switch InputPlumber device profile between the native controller and Lenovo Legion Go S.
+"""
+
+import glob
+import json
+import os
+import shutil
+import subprocess
+from contextlib import contextmanager
+from pathlib import Path
+
+import decky
+
+BOARD_PATH = "/sys/devices/virtual/dmi/id/board_name"
+INPUTPLUMBER_DEVICES_DIR = "/usr/share/inputplumber/devices"
+LEGION_GO_S_NAME = "Lenovo Legion Go S"
+SYSTEMCTL = shutil.which("systemctl") or "/usr/bin/systemctl"
+STEAMOS_READONLY = shutil.which("steamos-readonly") or "/usr/bin/steamos-readonly"
+
+BACKUP_META_FILE = "backup_meta.json"
+BACKUP_YAML_FILE = "device_yaml_backup.yaml"
+
+
+class Plugin:
+    settings_path: str = ""
+    settings: dict = {}
+    last_error: str = ""
+
+    def _backup_meta_path(self) -> str:
+        return os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, BACKUP_META_FILE)
+
+    def _backup_yaml_path(self) -> str:
+        return os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, BACKUP_YAML_FILE)
+
+    def _set_error(self, message: str) -> str:
+        self.last_error = message
+        decky.logger.error(message)
+        return message
+
+    def _system_command_env(self) -> dict:
+        env = {
+            "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "LANG": os.environ.get("LANG", "C.UTF-8"),
+        }
+        for key in ("HOME", "USER", "LOGNAME", "SHELL"):
+            if key in os.environ:
+                env[key] = os.environ[key]
+        return env
+
+    def _run_command(
+        self, args: list[str], *, record_error: bool = True
+    ) -> subprocess.CompletedProcess | None:
+        try:
+            result = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                check=False,
+                env=self._system_command_env(),
+            )
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "").strip()
+                message = (
+                    f"{' '.join(args)} failed"
+                    + (f": {detail}" if detail else "")
+                )
+                if record_error:
+                    self._set_error(message)
+                else:
+                    decky.logger.warning(message)
+                return None
+            return result
+        except Exception as e:
+            message = f"{' '.join(args)} error: {e}"
+            if record_error:
+                self._set_error(message)
+            else:
+                decky.logger.warning(message)
+            return None
+
+    def _read_board_name(self) -> str | None:
+        try:
+            with open(BOARD_PATH, "r", encoding="utf-8") as f:
+                board = f.read().strip()
+            return board or None
+        except Exception as e:
+            decky.logger.error(f"Failed to read board name: {e}")
+            return None
+
+    def _find_device_yaml(self) -> str | None:
+        board = self._read_board_name()
+        if not board:
+            return None
+
+        matches: list[str] = []
+        pattern = os.path.join(INPUTPLUMBER_DEVICES_DIR, "*.yaml")
+        for yaml_path in sorted(glob.glob(pattern)):
+            try:
+                with open(yaml_path, "r", encoding="utf-8") as f:
+                    if board in f.read():
+                        matches.append(yaml_path)
+            except Exception as e:
+                decky.logger.warning(f"Could not read {yaml_path}: {e}")
+
+        if not matches:
+            return None
+        if len(matches) > 1:
+            decky.logger.warning(
+                "Multiple device yaml files matched board %s, using %s",
+                board,
+                matches[0],
+            )
+        return matches[0]
+
+    def _read_device_name(self, yaml_path: str) -> str | None:
+        try:
+            with open(yaml_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("name:"):
+                        return line.split(":", 1)[1].strip()
+        except Exception as e:
+            decky.logger.error(f"Failed to read device name from {yaml_path}: {e}")
+        return None
+
+    def _is_readonly_enabled(self) -> bool:
+        if not os.path.exists(STEAMOS_READONLY):
+            return False
+        result = subprocess.run(
+            [STEAMOS_READONLY, "status"],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=self._system_command_env(),
+        )
+        return result.returncode == 0
+
+    @contextmanager
+    def _writable_filesystem(self):
+        was_readonly = self._is_readonly_enabled()
+        if was_readonly:
+            if self._run_command([STEAMOS_READONLY, "disable"]) is None:
+                raise RuntimeError("Failed to disable SteamOS read-only mode")
+        try:
+            yield
+        finally:
+            if was_readonly:
+                self._run_command(
+                    [STEAMOS_READONLY, "enable"], record_error=False
+                )
+
+    def _restart_inputplumber(self) -> bool:
+        return self._run_command([SYSTEMCTL, "restart", "inputplumber"]) is not None
+
+    def _load_backup_meta(self) -> dict | None:
+        path = self._backup_meta_path()
+        try:
+            if not os.path.exists(path):
+                return None
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            decky.logger.error(f"Failed to load backup metadata: {e}")
+            return None
+
+    def _save_backup_meta(self, meta: dict) -> bool:
+        path = self._backup_meta_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(meta, f, indent=2)
+            return True
+        except Exception as e:
+            self._set_error(f"Failed to save backup metadata: {e}")
+            return False
+
+    def _create_backup(self, yaml_path: str, original_name: str) -> bool:
+        backup_yaml = self._backup_yaml_path()
+        try:
+            os.makedirs(os.path.dirname(backup_yaml), exist_ok=True)
+            shutil.copy2(yaml_path, backup_yaml)
+            return self._save_backup_meta(
+                {
+                    "original_name": original_name,
+                    "device_yaml_path": yaml_path,
+                }
+            )
+        except Exception as e:
+            self._set_error(f"Failed to create backup: {e}")
+            return False
+
+    def _replace_device_name(self, yaml_path: str, new_name: str) -> bool:
+        try:
+            with open(yaml_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+
+            replaced = False
+            new_lines: list[str] = []
+            for line in lines:
+                if line.startswith("name:"):
+                    new_lines.append(f"name: {new_name}\n")
+                    replaced = True
+                else:
+                    new_lines.append(line)
+
+            if not replaced:
+                self._set_error(f"No name field found in {yaml_path}")
+                return False
+
+            with open(yaml_path, "w", encoding="utf-8") as f:
+                f.writelines(new_lines)
+            return True
+        except Exception as e:
+            self._set_error(f"Failed to update device name: {e}")
+            return False
+
+    def _restore_from_backup(self) -> bool:
+        meta = self._load_backup_meta()
+        backup_yaml = self._backup_yaml_path()
+        if not meta or not os.path.exists(backup_yaml):
+            self._set_error("No backup found to restore the default controller profile")
+            return False
+
+        yaml_path = meta.get("device_yaml_path")
+        if not yaml_path:
+            self._set_error("Backup metadata is missing device_yaml_path")
+            return False
+
+        try:
+            shutil.copy2(backup_yaml, yaml_path)
+            return True
+        except Exception as e:
+            self._set_error(f"Failed to restore backup: {e}")
+            return False
+
+    def _detect_active_controller(self, yaml_path: str, default_name: str) -> str:
+        current_name = self._read_device_name(yaml_path)
+        if current_name == LEGION_GO_S_NAME:
+            return "legion_go_s"
+        return "default"
+
+    def _require_root(self) -> bool:
+        if os.geteuid() == 0:
+            return True
+        self._set_error(
+            "Controller switching requires root. Run: sudo systemctl restart plugin_loader"
+        )
+        return False
+
+    async def _main(self):
+        self.settings_path = os.path.join(
+            decky.DECKY_PLUGIN_SETTINGS_DIR, "settings.json"
+        )
+        await self.load_settings()
+        decky.logger.info(
+            "steamos-controller-changer initialized (euid=%s, plugin_dir=%s)",
+            os.geteuid(),
+            decky.DECKY_PLUGIN_DIR,
+        )
+
+    async def _unload(self):
+        decky.logger.info("steamos-controller-changer unloaded")
+
+    async def _migration(self):
+        pass
+
+    async def load_settings(self):
+        defaults = {"selected_controller": "default"}
+        try:
+            if os.path.exists(self.settings_path):
+                with open(self.settings_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                self.settings = {**defaults, **loaded}
+            else:
+                self.settings = defaults.copy()
+                await self.save_settings()
+        except Exception as e:
+            decky.logger.error(f"Failed to load settings: {e}")
+            self.settings = defaults.copy()
+        return self.settings
+
+    async def save_settings(self):
+        try:
+            os.makedirs(os.path.dirname(self.settings_path), exist_ok=True)
+            with open(self.settings_path, "w", encoding="utf-8") as f:
+                json.dump(self.settings, f, indent=2)
+        except Exception as e:
+            decky.logger.error(f"Failed to save settings: {e}")
+
+    def _read_plugin_version(self) -> str:
+        try:
+            package_json = Path(decky.DECKY_PLUGIN_DIR) / "package.json"
+            if package_json.exists():
+                with open(package_json, "r", encoding="utf-8") as f:
+                    return json.load(f).get("version", "unknown")
+        except Exception as e:
+            decky.logger.error(f"Failed to read plugin version: {e}")
+        return "unknown"
+
+    async def get_controller_settings(self) -> dict:
+        self.last_error = ""
+        yaml_path = self._find_device_yaml()
+        default_name = None
+        current_name = None
+        active_controller = "default"
+        device_available = yaml_path is not None
+
+        if yaml_path:
+            current_name = self._read_device_name(yaml_path)
+            meta = self._load_backup_meta()
+            if meta and meta.get("original_name"):
+                default_name = meta["original_name"]
+            elif current_name and current_name != LEGION_GO_S_NAME:
+                default_name = current_name
+            elif current_name == LEGION_GO_S_NAME:
+                default_name = meta.get("original_name") if meta else "Default Controller"
+            else:
+                default_name = "Default Controller"
+
+            active_controller = self._detect_active_controller(yaml_path, default_name)
+            self.settings["selected_controller"] = active_controller
+
+        return {
+            "device_available": device_available,
+            "device_yaml_path": yaml_path or "",
+            "board_name": self._read_board_name() or "",
+            "default_name": default_name or "Default Controller",
+            "current_name": current_name or "",
+            "active_controller": active_controller,
+            "legion_go_s_name": LEGION_GO_S_NAME,
+            "has_backup": os.path.exists(self._backup_yaml_path()),
+            "last_error": self.last_error,
+            "running_as_root": os.geteuid() == 0,
+            "effective_uid": os.geteuid(),
+            "plugin_version": self._read_plugin_version(),
+        }
+
+    async def set_controller(self, selection: str) -> bool:
+        self.last_error = ""
+        selection = (selection or "").strip().lower()
+        if selection not in ("default", "legion_go_s"):
+            self._set_error(f"Invalid controller selection: {selection}")
+            return False
+
+        if not self._require_root():
+            return False
+
+        yaml_path = self._find_device_yaml()
+        if not yaml_path:
+            self._set_error("Could not find InputPlumber device profile for this board")
+            return False
+
+        current_name = self._read_device_name(yaml_path)
+        if not current_name:
+            self._set_error("Could not read current controller name from device profile")
+            return False
+
+        active = self._detect_active_controller(yaml_path, current_name)
+        if active == selection:
+            self.settings["selected_controller"] = selection
+            await self.save_settings()
+            return True
+
+        try:
+            with self._writable_filesystem():
+                if selection == "legion_go_s":
+                    if current_name != LEGION_GO_S_NAME:
+                        if not os.path.exists(self._backup_yaml_path()):
+                            if not self._create_backup(yaml_path, current_name):
+                                return False
+                        if not self._replace_device_name(yaml_path, LEGION_GO_S_NAME):
+                            return False
+                else:
+                    if not self._restore_from_backup():
+                        return False
+
+                if not self._restart_inputplumber():
+                    return False
+        except RuntimeError as e:
+            self._set_error(str(e))
+            return False
+
+        self.settings["selected_controller"] = selection
+        await self.save_settings()
+        decky.logger.info("Controller switched to %s", selection)
+        return True

@@ -1,0 +1,7 @@
+node_modules/
+dist/
+release-staging/
+package-lock.json
+__pycache__/
+*.log
+*.zip
