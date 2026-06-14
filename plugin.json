@@ -4,8 +4,8 @@
   "flags": ["root"],
   "api_version": 1,
   "publish": {
-    "tags": ["hardware", "inputplumber", "controller", "legion-go-s", "steamos"],
-    "description": "Switch InputPlumber controller profile between the native device and Lenovo Legion Go S.",
+    "tags": ["hardware", "inputplumber", "controller", "legion-go-s", "dualsense", "ps5", "steamos"],
+    "description": "Switch InputPlumber controller profile between native device, Lenovo Legion Go S, and PS5 DualSense Edge.",
     "image": ""
   }
 }

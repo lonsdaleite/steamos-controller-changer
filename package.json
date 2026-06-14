@@ -1,7 +1,7 @@
 {
   "name": "steamos-controller-changer",
-  "version": "1.0.0",
-  "description": "Decky Loader plugin to switch InputPlumber controller profiles on SteamOS",
+  "version": "1.1.0",
+  "description": "Decky Loader plugin to switch InputPlumber profiles: native, Legion Go S, and PS5 DualSense Edge",
   "author": "lonsdaleite",
   "license": "MIT",
   "type": "module",

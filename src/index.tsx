@@ -11,7 +11,7 @@ import { callable, toaster } from "@decky/api";
 const { useState, useEffect } = window.SP_REACT;
 type VFC<P = {}> = (props: P) => JSX.Element | null;
 
-type ControllerSelection = "default" | "legion_go_s";
+type ControllerSelection = "default" | "legion_go_s" | "ps5_edge";
 
 interface ControllerSettings {
   device_available: boolean;
@@ -19,8 +19,10 @@ interface ControllerSettings {
   board_name: string;
   default_name: string;
   current_name: string;
+  yaml_profile: ControllerSelection | "default" | "legion_go_s";
   active_controller: ControllerSelection;
   legion_go_s_name: string;
+  ps5_edge_name: string;
   has_backup: boolean;
   last_error: string;
   running_as_root: boolean;
@@ -34,6 +36,20 @@ const getControllerSettings = callable<[], ControllerSettings>(
 const setController = callable<[ControllerSelection], boolean>("set_controller");
 
 const PLUGIN_TITLE = "SteamOS Controller Changer";
+
+const selectionLabel = (
+  selection: ControllerSelection,
+  settings: ControllerSettings
+): string => {
+  switch (selection) {
+    case "legion_go_s":
+      return settings.legion_go_s_name;
+    case "ps5_edge":
+      return settings.ps5_edge_name;
+    default:
+      return settings.default_name;
+  }
+};
 
 const ControllerChangerContent: VFC = () => {
   const [settings, setSettings] = useState<ControllerSettings | null>(null);
@@ -73,6 +89,10 @@ const ControllerChangerContent: VFC = () => {
       data: "legion_go_s" as ControllerSelection,
       label: data.legion_go_s_name,
     },
+    {
+      data: "ps5_edge" as ControllerSelection,
+      label: data.ps5_edge_name,
+    },
   ];
 
   const handleControllerChange = async (option: SingleDropdownOption) => {
@@ -91,12 +111,10 @@ const ControllerChangerContent: VFC = () => {
       await refreshSettings();
 
       if (success) {
+        const latest = await getControllerSettings();
         toaster.toast({
           title: PLUGIN_TITLE,
-          body:
-            next === "legion_go_s"
-              ? `Switched to ${settings?.legion_go_s_name ?? "Lenovo Legion Go S"}`
-              : `Restored ${settings?.default_name ?? "default controller"}`,
+          body: `Switched to ${selectionLabel(next, latest)}`,
         });
       } else {
         setSelected(previous);
@@ -150,7 +168,7 @@ const ControllerChangerContent: VFC = () => {
       <PanelSectionRow>
         <DropdownItem
           label="Controller Profile"
-          description="Switch InputPlumber device name for controller emulation"
+          description="Switch InputPlumber device profile and emulation target"
           rgOptions={buildOptions(settings)}
           selectedOption={selected}
           disabled={busy || !settings.running_as_root}
@@ -191,9 +209,9 @@ const ControllerChangerContent: VFC = () => {
 
       <PanelSectionRow>
         <div style={{ color: "#8b929a", fontSize: "11px" }}>
-          v{settings.plugin_version} | uid={settings.effective_uid} | active=
-          {settings.current_name || "unknown"} | backup=
-          {settings.has_backup ? "yes" : "no"}
+          v{settings.plugin_version} | uid={settings.effective_uid} | yaml=
+          {settings.yaml_profile} | selected={settings.active_controller} |
+          backup={settings.has_backup ? "yes" : "no"}
         </div>
       </PanelSectionRow>
     </PanelSection>

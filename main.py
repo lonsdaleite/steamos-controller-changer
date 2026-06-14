@@ -1,6 +1,6 @@
 """
 steamos-controller-changer - Decky Loader Plugin Backend
-Switch InputPlumber device profile between the native controller and Lenovo Legion Go S.
+Switch InputPlumber device profile between native, Legion Go S, and PS5 DualSense Edge.
 """
 
 import glob
@@ -16,8 +16,16 @@ import decky
 BOARD_PATH = "/sys/devices/virtual/dmi/id/board_name"
 INPUTPLUMBER_DEVICES_DIR = "/usr/share/inputplumber/devices"
 LEGION_GO_S_NAME = "Lenovo Legion Go S"
+PS5_EDGE_NAME = "PS5 DualSense Edge"
+PS5_EDGE_TARGET = "ds5-edge"
+DEFAULT_TARGET = "deck-uhid"
+INPUTPLUMBER_DEVICE_INDEX = "0"
+
 SYSTEMCTL = shutil.which("systemctl") or "/usr/bin/systemctl"
 STEAMOS_READONLY = shutil.which("steamos-readonly") or "/usr/bin/steamos-readonly"
+INPUTPLUMBER = shutil.which("inputplumber") or "/usr/bin/inputplumber"
+
+VALID_SELECTIONS = ("default", "legion_go_s", "ps5_edge")
 
 BACKUP_META_FILE = "backup_meta.json"
 BACKUP_YAML_FILE = "device_yaml_backup.yaml"
@@ -80,6 +88,21 @@ class Plugin:
                 decky.logger.warning(message)
             return None
 
+    def _set_inputplumber_target(self, target: str) -> bool:
+        return (
+            self._run_command(
+                [
+                    INPUTPLUMBER,
+                    "device",
+                    INPUTPLUMBER_DEVICE_INDEX,
+                    "targets",
+                    "set",
+                    target,
+                ]
+            )
+            is not None
+        )
+
     def _read_board_name(self) -> str | None:
         try:
             with open(BOARD_PATH, "r", encoding="utf-8") as f:
@@ -123,6 +146,12 @@ class Plugin:
         except Exception as e:
             decky.logger.error(f"Failed to read device name from {yaml_path}: {e}")
         return None
+
+    def _detect_yaml_profile(self, yaml_path: str) -> str:
+        current_name = self._read_device_name(yaml_path)
+        if current_name == LEGION_GO_S_NAME:
+            return "legion_go_s"
+        return "default"
 
     def _is_readonly_enabled(self) -> bool:
         if not os.path.exists(STEAMOS_READONLY):
@@ -234,12 +263,6 @@ class Plugin:
             self._set_error(f"Failed to restore backup: {e}")
             return False
 
-    def _detect_active_controller(self, yaml_path: str, default_name: str) -> str:
-        current_name = self._read_device_name(yaml_path)
-        if current_name == LEGION_GO_S_NAME:
-            return "legion_go_s"
-        return "default"
-
     def _require_root(self) -> bool:
         if os.geteuid() == 0:
             return True
@@ -247,6 +270,61 @@ class Plugin:
             "Controller switching requires root. Run: sudo systemctl restart plugin_loader"
         )
         return False
+
+    async def _restore_default_yaml(self, yaml_path: str) -> bool:
+        yaml_profile = self._detect_yaml_profile(yaml_path)
+        if yaml_profile == "default":
+            return True
+
+        try:
+            with self._writable_filesystem():
+                if not self._restore_from_backup():
+                    return False
+                if not self._restart_inputplumber():
+                    return False
+        except RuntimeError as e:
+            self._set_error(str(e))
+            return False
+        return True
+
+    async def _apply_legion_go_s_yaml(self, yaml_path: str, current_name: str) -> bool:
+        if current_name == LEGION_GO_S_NAME:
+            return True
+
+        try:
+            with self._writable_filesystem():
+                if not os.path.exists(self._backup_yaml_path()):
+                    if not self._create_backup(yaml_path, current_name):
+                        return False
+                if not self._replace_device_name(yaml_path, LEGION_GO_S_NAME):
+                    return False
+                if not self._restart_inputplumber():
+                    return False
+        except RuntimeError as e:
+            self._set_error(str(e))
+            return False
+        return True
+
+    async def _apply_startup_settings(self):
+        selection = self.settings.get("selected_controller", "default")
+        if selection != "ps5_edge":
+            return
+
+        if os.geteuid() != 0:
+            decky.logger.warning(
+                "Cannot reapply PS5 target on startup without root (euid=%s)",
+                os.geteuid(),
+            )
+            return
+
+        if self._set_inputplumber_target(PS5_EDGE_TARGET):
+            decky.logger.info(
+                "Reapplied %s inputplumber target on startup", PS5_EDGE_NAME
+            )
+        else:
+            decky.logger.error(
+                "Failed to reapply PS5 target on startup: %s", self.last_error
+            )
 
     async def _main(self):
         self.settings_path = os.path.join(
@@ -258,6 +336,7 @@ class Plugin:
             os.geteuid(),
             decky.DECKY_PLUGIN_DIR,
         )
+        await self._apply_startup_settings()
 
     async def _unload(self):
         decky.logger.info("steamos-controller-changer unloaded")
@@ -298,37 +377,37 @@ class Plugin:
             decky.logger.error(f"Failed to read plugin version: {e}")
         return "unknown"
 
+    def _resolve_default_name(
+        self, yaml_path: str | None, current_name: str | None
+    ) -> str:
+        meta = self._load_backup_meta()
+        if meta and meta.get("original_name"):
+            return meta["original_name"]
+        if current_name and current_name != LEGION_GO_S_NAME:
+            return current_name
+        if current_name == LEGION_GO_S_NAME:
+            return meta.get("original_name") if meta else "Default Controller"
+        return "Default Controller"
+
     async def get_controller_settings(self) -> dict:
         self.last_error = ""
         yaml_path = self._find_device_yaml()
-        default_name = None
-        current_name = None
-        active_controller = "default"
-        device_available = yaml_path is not None
-
-        if yaml_path:
-            current_name = self._read_device_name(yaml_path)
-            meta = self._load_backup_meta()
-            if meta and meta.get("original_name"):
-                default_name = meta["original_name"]
-            elif current_name and current_name != LEGION_GO_S_NAME:
-                default_name = current_name
-            elif current_name == LEGION_GO_S_NAME:
-                default_name = meta.get("original_name") if meta else "Default Controller"
-            else:
-                default_name = "Default Controller"
-
-            active_controller = self._detect_active_controller(yaml_path, default_name)
-            self.settings["selected_controller"] = active_controller
+        current_name = self._read_device_name(yaml_path) if yaml_path else None
+        yaml_profile = self._detect_yaml_profile(yaml_path) if yaml_path else "default"
+        selected = self.settings.get("selected_controller", "default")
+        if selected not in VALID_SELECTIONS:
+            selected = "default"
 
         return {
-            "device_available": device_available,
+            "device_available": yaml_path is not None,
             "device_yaml_path": yaml_path or "",
             "board_name": self._read_board_name() or "",
-            "default_name": default_name or "Default Controller",
+            "default_name": self._resolve_default_name(yaml_path, current_name),
             "current_name": current_name or "",
-            "active_controller": active_controller,
+            "yaml_profile": yaml_profile,
+            "active_controller": selected,
             "legion_go_s_name": LEGION_GO_S_NAME,
+            "ps5_edge_name": PS5_EDGE_NAME,
             "has_backup": os.path.exists(self._backup_yaml_path()),
             "last_error": self.last_error,
             "running_as_root": os.geteuid() == 0,
@@ -339,7 +418,7 @@ class Plugin:
     async def set_controller(self, selection: str) -> bool:
         self.last_error = ""
         selection = (selection or "").strip().lower()
-        if selection not in ("default", "legion_go_s"):
+        if selection not in VALID_SELECTIONS:
             self._set_error(f"Invalid controller selection: {selection}")
             return False
 
@@ -356,30 +435,38 @@ class Plugin:
             self._set_error("Could not read current controller name from device profile")
             return False
 
-        active = self._detect_active_controller(yaml_path, current_name)
-        if active == selection:
-            self.settings["selected_controller"] = selection
-            await self.save_settings()
+        previous = self.settings.get("selected_controller", "default")
+        if previous not in VALID_SELECTIONS:
+            previous = "default"
+
+        if previous == selection:
+            if selection == "ps5_edge":
+                return self._set_inputplumber_target(PS5_EDGE_TARGET)
             return True
 
-        try:
-            with self._writable_filesystem():
-                if selection == "legion_go_s":
-                    if current_name != LEGION_GO_S_NAME:
-                        if not os.path.exists(self._backup_yaml_path()):
-                            if not self._create_backup(yaml_path, current_name):
-                                return False
-                        if not self._replace_device_name(yaml_path, LEGION_GO_S_NAME):
-                            return False
-                else:
-                    if not self._restore_from_backup():
-                        return False
+        yaml_profile = self._detect_yaml_profile(yaml_path)
 
-                if not self._restart_inputplumber():
+        if previous == "ps5_edge" and selection != "ps5_edge":
+            if not self._set_inputplumber_target(DEFAULT_TARGET):
+                return False
+
+        if selection == "ps5_edge":
+            if yaml_profile != "default":
+                if not await self._restore_default_yaml(yaml_path):
                     return False
-        except RuntimeError as e:
-            self._set_error(str(e))
-            return False
+            if not self._set_inputplumber_target(PS5_EDGE_TARGET):
+                return False
+            self.settings["selected_controller"] = "ps5_edge"
+            await self.save_settings()
+            decky.logger.info("Controller switched to %s", selection)
+            return True
+
+        if selection == "legion_go_s":
+            if not await self._apply_legion_go_s_yaml(yaml_path, current_name):
+                return False
+        elif yaml_profile != "default":
+            if not await self._restore_default_yaml(yaml_path):
+                return False
 
         self.settings["selected_controller"] = selection
         await self.save_settings()
