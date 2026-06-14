@@ -35,7 +35,7 @@ const getControllerSettings = callable<[], ControllerSettings>(
 );
 const setController = callable<[ControllerSelection], boolean>("set_controller");
 
-const PLUGIN_TITLE = "SteamOS Controller Changer";
+const PLUGIN_TITLE = "Controller Changer";
 
 const selectionLabel = (
   selection: ControllerSelection,
@@ -169,6 +169,8 @@ const ControllerChangerContent: VFC = () => {
         <DropdownItem
           label="Controller Profile"
           description="Switch InputPlumber device profile and emulation target"
+          layout="below"
+          childrenContainerWidth="max"
           rgOptions={buildOptions(settings)}
           selectedOption={selected}
           disabled={busy || !settings.running_as_root}

@@ -4,7 +4,7 @@ set -euo pipefail
 INSTALL_SCRIPT_REV=1
 
 REPO="lonsdaleite/steamos-controller-changer"
-PLUGIN_NAME="SteamOS Controller Changer"
+PLUGIN_NAME="Controller Changer"
 PLUGINS_DIR="${HOME}/homebrew/plugins"
 PLUGIN_DIR="${PLUGINS_DIR}/${PLUGIN_NAME}"
 
@@ -48,6 +48,7 @@ curl -fsSL -o "$zip_path" "$zip_url"
 # Decky often owns ~/homebrew/plugins as root after prior installs.
 sudo mkdir -p "$PLUGINS_DIR"
 sudo rm -rf "$PLUGIN_DIR"
+sudo rm -rf "${PLUGINS_DIR}/SteamOS Controller Changer"
 
 echo "Installing to ${PLUGIN_DIR}"
 sudo unzip -q -o "$zip_path" -d "$PLUGINS_DIR"

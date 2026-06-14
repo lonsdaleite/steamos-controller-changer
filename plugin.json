@@ -1,5 +1,5 @@
 {
-  "name": "SteamOS Controller Changer",
+  "name": "Controller Changer",
   "author": "lonsdaleite",
   "flags": ["root"],
   "api_version": 1,
